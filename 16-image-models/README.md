@@ -4,20 +4,36 @@
 
 ---
 
+## Estado de verificación
+
+Este módulo es la **fuente de referencia** dentro del repositorio: los demás módulos remiten aquí para las especificaciones concretas. Por tanto cada ficha lleva un marcador explícito de hasta dónde está contrastada.
+
+| Marca | Significado |
+|:------|:------------|
+| ✅ | Contrastado contra paper, config o model card oficial |
+| 🟡 | Coherente con las fuentes conocidas, **pendiente de contraste directo** |
+| ⚠️ | Reconstruido de fuentes secundarias — **no citar sin verificar** |
+
+> Regla del repositorio: ninguna afirmación marcada 🟡 o ⚠️ debe propagarse a otros módulos como si fuese un hecho establecido.
+
+---
+
 ## Evolución cronológica
 
 ```mermaid
 timeline
     title Evolución de Modelos de Generación de Imagen
     2020 : DDPM (Ho et al.)
-         : U-Net, ε-prediction, 1000 pasos
-    2021 : DDIM (Song et al.)
+         : U-Net, ε-prediction, 1000 pasos, INCONDICIONAL
+    2021 : DDIM (J. Song, Meng, Ermon)
          : Sampling determinístico, 50 pasos
          : Guided Diffusion (Dhariwal & Nichol)
+         : Primer class-conditional + classifier guidance
     2022 : Latent Diffusion / SD 1.x (Rombach et al.)
          : Difusión en latent space, CLIP conditioning
+         : SD 2.x — OpenCLIP; la variante 768-v introduce v-prediction
     2023 : SDXL (Podell et al.)
-         : 2.6B U-Net, dual CLIP, v-prediction
+         : 2.6B U-Net, dual CLIP, micro-conditioning, ε-prediction
          : PixArt-α (Chen et al.)
          : DiT eficiente, 600M params
     2024 : SD3 (Esser et al.) — MMDiT, Rectified Flow
@@ -36,25 +52,42 @@ timeline
 
 ## Model Cards
 
-### DDPM (2020)
+### DDPM (2020) ✅
 
 | Aspecto | Detalle |
 |:--------|:--------|
 | **Paper** | *Denoising Diffusion Probabilistic Models* (Ho, Jain, Abbeel) |
-| **Arquitectura** | U-Net con self-attention |
-| **Parámetros** | ~35.7M (CIFAR-10) / ~114M (LSUN) |
-| **Text Encoder** | Ninguno (class-conditional o unconditional) |
-| **Conditioning** | Class label (embedding) |
+| **Arquitectura** | U-Net con self-attention **solo en 16×16** |
+| **Parámetros** | ~35.7M (CIFAR-10) / ~114M (256×256) 🟡 |
+| **Text Encoder** | Ninguno |
+| **Conditioning** | **Ninguno — el modelo es incondicional** |
 | **VAE** | Ninguno (pixel space) |
-| **Training Objective** | ε-prediction, loss simplificado del ELBO |
+| **Training Objective** | ε-prediction, `L_simple` (ELBO sin la ponderación) |
 | **Noise Schedule** | Linear: β₁=10⁻⁴, β_T=0.02, T=1000 |
-| **Sampling** | DDPM ancestral, 1000 pasos |
-| **Guidance** | Ninguna |
-| **Resolución** | 32×32 (CIFAR-10), 256×256 (LSUN) |
-| **Fortalezas** | Fundacional, matemáticamente riguroso, training estable |
-| **Debilidades** | Lento (1000 pasos), baja resolución, sin text conditioning |
-| **Licencia** | MIT |
-| **Fuente** | [arxiv:2006.11239](https://arxiv.org/abs/2006.11239) |
+| **Sampling** | DDPM ancestral, 1000 pasos, σₜ²=βₜ en el resultado principal |
+| **Guidance** | Ninguna (no existía) |
+| **Resolución** | 32×32 (CIFAR-10), 256×256 (LSUN, CelebA-HQ) |
+| **Resultados** | **CIFAR-10: FID 3.17, IS 9.46, NLL ≤3.75 bits/dim** ✅ |
+| **Fortalezas** | Fundacional, riguroso, training estable |
+| **Debilidades** | Lento, baja resolución, **sin ningún condicionamiento** |
+| **Fuente** | [arxiv:2006.11239](https://arxiv.org/abs/2006.11239) · detalle en [02](../02-ddpm/README.md) |
+
+> ⚠️ **Corrección frecuente**: catalogar DDPM como «class-conditional o unconditional». Ho et al. (2020) entrenan **exclusivamente modelos incondicionales** en CIFAR-10, LSUN y CelebA-HQ. El condicionamiento por clase aparece un año después con Dhariwal & Nichol (2021), junto con classifier guidance.
+
+---
+
+### Stable Diffusion 2.x (2022) 🟡
+
+Ficha breve, pero necesaria: es el modelo que la literatura confunde con más frecuencia.
+
+| Aspecto | Detalle |
+|:--------|:--------|
+| **Text Encoder** | OpenCLIP ViT-H/14 (sustituye a CLIP ViT-L de SD 1.x) |
+| **Variantes** | SD 2.0/2.1 **base (512)**: ε-prediction · SD 2.0/2.1 **768-v**: **v-prediction** |
+| **Resolución** | 512×512 (base), 768×768 (variante -v) |
+| **Relevancia** | **Es el único modelo de la familia SD que usa v-prediction** |
+
+> Este es el origen del error más repetido del área: la v-prediction pertenece a **SD 2.x-768-v**, no a SDXL. Ver [01 §7](../01-foundations/README.md#7-parametrizaciones).
 
 ---
 
@@ -90,19 +123,23 @@ timeline
 | **Arquitectura** | U-Net (más grande, transformer blocks más profundos) |
 | **Parámetros** | ~2.6B (U-Net base) + ~800M (refiner, opcional) |
 | **Text Encoders** | CLIP ViT-L/14 (768d) + OpenCLIP ViT-bigG/14 (1280d) |
-| **Conditioning** | Cross-attention (2048d concatenados) + size/crop embeddings |
-| **VAE** | KL-regularized, f=8 (misma que SD 1.5 pero fine-tuned) |
+| **Conditioning** | Cross-attention (2048d concatenados) + pooled (1280d) + **micro-conditioning** |
+| **Micro-conditioning** | `original_size`, `crop_coords`, `target_size` vía embeddings ([11 §4](../11-conditioning/README.md#4-micro-conditioning-sdxl)) |
+| **VAE** | KL-f8, 4 canales, re-entrenada (scale factor 0.13025, no 0.18215) |
 | **Latent Shape** | 128×128×4 (para output 1024×1024) |
-| **Training Objective** | v-prediction (cambio respecto a SD 1.5) |
-| **Noise Schedule** | Offset noise + shifted schedule |
+| **Training Objective** | **ε-prediction** (igual que SD 1.5) |
+| **Noise Schedule** | `scaled_linear` (β lineal en √β), T=1000 |
 | **Sampling** | 25-50 pasos |
-| **Guidance** | CFG (scale 5-9 típico) |
-| **Resolución** | 1024×1024 nativa, multi-aspect |
+| **Guidance** | CFG clásico, **2 forward passes** (scale 5-9 típico) |
+| **Resolución** | 1024×1024 nativa, multi-aspect ratio |
 | **VRAM** | ~8-12GB (FP16) |
-| **Fortalezas** | Gran salto en calidad vs SD 1.5, mejor composición, ecosistema rico |
-| **Debilidades** | Text rendering limitado, todavía U-Net, sin T5 |
-| **Licencia** | SDXL License (permisiva con restricciones) |
+| **Fortalezas** | Gran salto de calidad, micro-conditioning, ecosistema muy rico |
+| **Debilidades** | Text rendering limitado, VAE de 4 canales, sin T5 |
 | **Fuente** | [arxiv:2307.01952](https://arxiv.org/abs/2307.01952) |
+
+> ⚠️ **Corrección frecuente — la más extendida del área**: SDXL **no usa v-prediction**. Su configuración es `prediction_type: "epsilon"`. La confusión viene de SD 2.x-768-v. Este error aparecía en tres lugares distintos de este repositorio y se ha corregido en todos.
+>
+> Tampoco su schedule es «offset noise + shifted»: es `scaled_linear`, el mismo de LDM. *Offset noise* es una técnica de entrenamiento independiente del schedule, y atribuirla a SDXL requiere fuente. 🟡
 
 ---
 
@@ -117,8 +154,8 @@ timeline
 | **Conditioning** | Cross-attention (T5 tokens) |
 | **VAE** | SD VAE (f=8) |
 | **Training Objective** | ε-prediction |
-| **Innovación** | Training strategy decomposition: (1) pixel distribution → (2) text alignment → (3) aesthetic quality |
-| **Training Cost** | ~10.8% del coste de SDXL |
+| **Innovación** | Descomposición del entrenamiento en tres etapas: (1) distribución de píxeles → (2) alineamiento texto-imagen → (3) calidad estética |
+| **Training Cost** | ~10.8 % del coste de **Stable Diffusion v1.5** (≈675 vs ≈6 250 días-A100) 🟡 — la comparación del paper es contra SD 1.5, **no contra SDXL** |
 | **Sampling** | DPM-Solver, 14-20 pasos |
 | **Resolución** | Hasta 1024×1024 |
 | **VRAM** | ~6GB (FP16) |
@@ -183,13 +220,17 @@ timeline
 | **Training Objective** | Rectified Flow (velocity prediction) |
 | **Blocks** | 19 DoubleStreamBlocks + 38 SingleStreamBlocks |
 | **Sampling** | FlowMatch Euler, 20-50 pasos (dev), 1-4 pasos (schnell) |
-| **Guidance** | CFG (dev) / guidance-free (schnell) |
+| **Guidance** | **Destilada en ambas variantes** — 1 forward pass por paso |
+| **↳ dev** | Escala de guidance ajustable (típ. 3.5) como **embedding**, no como CFG |
+| **↳ schnell** | Guidance fija; además destilado en pasos |
 | **Resolución** | ~1 megapíxel, multi-aspect |
 | **VRAM** | ~24GB (FP16), ~12GB (FP8/NF4) |
-| **Variantes** | dev (non-commercial), schnell (Apache 2.0, distilled) |
+| **Variantes** | dev (non-commercial), schnell (Apache 2.0) |
 | **Fortalezas** | Calidad excepcional, text rendering, coherencia |
-| **Debilidades** | Alto VRAM, dev es non-commercial |
+| **Debilidades** | Alto VRAM; dev es non-commercial; **sin negative prompts** (consecuencia de la guidance destilada) |
 | **Fuente** | [bfl.ai](https://bfl.ai) |
+
+> ⚠️ **Corrección frecuente**: describir FLUX.1 dev como «CFG clásico, 2 forward passes». Está *guidance-distilled*: 30 pasos son **30 NFE**, no 60, y su escala 3.5 **no es comparable** con el CFG 7.5 de SDXL — son magnitudes distintas. Ver [09 §8](../09-guidance/README.md#8-guidance-en-modelos-modernos).
 
 ---
 
@@ -250,18 +291,22 @@ timeline
 
 ## Tabla resumen comparativa
 
-| Modelo | Año | Arch | Params | Objective | Pasos | Resolución | VRAM (FP16) |
-|:-------|:----|:-----|:-------|:----------|:------|:-----------|:------------|
-| DDPM | 2020 | U-Net | 35-114M | ε-pred | 1000 | 256² | <2GB |
-| SD 1.5 | 2022 | U-Net | 860M | ε-pred | 20-50 | 512² | 4-6GB |
-| SDXL | 2023 | U-Net | 2.6B | v-pred | 25-50 | 1024² | 8-12GB |
-| PixArt-α | 2023 | DiT | 600M | ε-pred | 14-20 | 1024² | ~6GB |
-| SD3 | 2024 | MMDiT | 2-8B | RF velocity | 28 | 1024² | 12-24GB |
-| AuraFlow | 2024 | RF Transf | 6.8B | RF velocity | ~25 | 1024² | ~20GB |
-| FLUX.1 | 2024 | RF Transf | 12B | RF velocity | 20-50 | ~1MP | ~24GB |
-| FLUX.2 | 2025 | VLM+RF | 32B+24B | RF velocity | ~30 | 4MP | ~40GB+ |
-| Z-Image | 2025 | S3-DiT | 6B | FM velocity | ~20 | Variable | <16GB |
-| Qwen-Image 3.0 | 2026 | LLM+MMDiT | Variable | FM velocity | ~25 | 2K+ | Variable |
+| Modelo | Año | Arch | Params | Objective | Condicionamiento | Guidance | Pasos | NFE | Resolución | VRAM (FP16) | Verif. |
+|:-------|:----|:-----|:-------|:----------|:-----------------|:---------|:------|----:|:-----------|:------------|:------|
+| DDPM | 2020 | U-Net | 35-114M | ε-pred | **ninguno** | — | 1000 | 1000 | 256² | <2GB | ✅ |
+| SD 1.5 | 2022 | U-Net | 860M | ε-pred | CLIP-L | CFG 2× | 20-50 | 40-100 | 512² | 4-6GB | ✅ |
+| SD 2.1-768-v | 2022 | U-Net | 865M | **v-pred** | OpenCLIP-H | CFG 2× | 20-50 | 40-100 | 768² | 5-8GB | 🟡 |
+| SDXL | 2023 | U-Net | 2.6B | **ε-pred** | CLIP-L+G + micro | CFG 2× | 25-50 | 50-100 | 1024² | 8-12GB | ✅ |
+| PixArt-α | 2023 | DiT | 600M | ε-pred | T5-XXL | CFG 2× | 14-20 | 28-40 | 1024² | ~6GB | 🟡 |
+| SD3 / 3.5 | 2024 | MMDiT | 2-8B | RF velocity | CLIP-L+G + T5 | CFG 2× | 28 | 56 | 1024² | 12-24GB | 🟡 |
+| AuraFlow | 2024 | RF Transf | 6.8B | RF velocity | T5 | CFG 2× | ~25 | ~50 | 1024² | ~20GB | ⚠️ |
+| FLUX.1 dev | 2024 | RF Transf | 12B | RF velocity | CLIP-L + T5 | **destilada 1×** | 20-50 | **20-50** | ~1MP | ~24GB | 🟡 |
+| FLUX.1 schnell | 2024 | RF Transf | 12B | RF (destilado) | CLIP-L + T5 | destilada 1× | 1-4 | 1-4 | ~1MP | ~24GB | 🟡 |
+| FLUX.2 | 2025 | VLM+RF | 32B+24B | RF velocity | VLM | destilada | ~30 | ~30 | 4MP | ~40GB+ | ⚠️ |
+| Z-Image | 2025 | S3-DiT | 6B | FM velocity | single-stream | — | ~20 | ~20 | Variable | <16GB | ⚠️ |
+| Qwen-Image 3.0 | 2026 | LLM+MMDiT | Variable | FM velocity | MLLM | — | ~25 | ~25 | 2K+ | Variable | ⚠️ |
+
+> **Las columnas que suelen faltar y más engañan si se omiten**: `Guidance` y `NFE`. Un modelo con CFG clásico cuesta el doble de lo que sugiere su número de pasos. SD3 con 28 pasos cuesta 56 evaluaciones; FLUX.1 dev con 30 pasos cuesta 30. Ver [15 §10](../15-pipelines/README.md#10-dónde-está-el-cuello-de-botella).
 
 ---
 
