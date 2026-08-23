@@ -6,13 +6,15 @@
 
 ## Índice
 
-1. [De imagen a video: qué cambia](#1-qué-cambia)
-2. [Arquitecturas de video](#2-arquitecturas)
-3. [VAEs 3D y Causal VAEs](#3-vaes-3d)
+1. [De imagen a video: qué cambia](#1-de-imagen-a-video-qué-cambia)
+2. [Arquitecturas de video](#2-arquitecturas-de-video)
+3. [VAEs 3D y Causal VAEs](#3-vaes-3d-y-causal-vaes)
 4. [Temporal attention](#4-temporal-attention)
-5. [Conditioning en video](#5-conditioning)
-6. [Model cards de video](#6-model-cards)
-7. [Scaling computacional: imagen vs video](#7-scaling)
+5. [Conditioning en video](#5-conditioning-en-video)
+6. [Model cards de video](#6-model-cards-de-video)
+7. [Scaling computacional: imagen vs video](#7-scaling-computacional-imagen-vs-video)
+
+> **Estado de verificación**: este módulo usa el mismo criterio que [16 — Image Models](../16-image-models/README.md): ✅ contrastado · 🟡 pendiente de contraste directo · ⚠️ reconstruido de fuentes secundarias. Las especificaciones de modelos de 2025-2026 son en su mayoría 🟡 o ⚠️.
 
 ---
 
@@ -110,10 +112,12 @@ graph TB
 
 ### ¿Por qué no usar la VAE 2D frame por frame?
 
-| Enfoque | Consistencia temporal | Eficiencia | Calidad |
-|:--------|:---------------------|:-----------|:--------|
-| VAE 2D por frame | ✗ (flickering) | Baja (N decodificaciones) | Buena por frame |
-| **VAE 3D** | ✓ (temporal coherence) | Alta (1 decodificación) | Buena + consistente |
+| Enfoque | Consistencia temporal | Tamaño del latente | Calidad |
+|:--------|:---------------------|:-------------------|:--------|
+| VAE 2D por frame | ✗ **flickering**: cada frame se codifica sin saber de los demás | `T × h × w × c` — **sin compresión temporal** | Buena por frame, incoherente en el tiempo |
+| **VAE 3D** | ✓ el encoder ve varios frames a la vez | `(T/f_t) × h × w × c` — **comprime también en el tiempo** | Coherente |
+
+> **La ventaja real no es «una decodificación en lugar de N»** — un decoder 3D procesa el tensor completo y su coste crece con `T` igual. Las dos ventajas verdaderas son: **(a)** compresión temporal, que reduce el número de posiciones latentes sobre las que difundir en un factor `f_t`; y **(b)** que el encoder ve una ventana temporal, lo que elimina el parpadeo entre frames.
 
 ### 3D Causal VAE (Wan)
 
@@ -139,19 +143,31 @@ graph LR
 
 ### ¿Por qué "causal"?
 
-**Causal** = cada frame solo puede depender de frames **anteriores**, no futuros. Esto permite:
-- Generar video de **longitud arbitraria** (streaming)
-- Mantener consistencia temporal sin requerir todos los frames en memoria
-- Compatible con **auto-regressive extension** (generar más frames)
+**Causal** = cada frame solo puede depender de frames **anteriores**, nunca futuros. Esto permite:
 
-### Comparación de VAEs de video
+- Generar vídeo de **longitud arbitraria** (streaming, extensión autoregresiva)
+- Codificar y decodificar **por ventanas** sin tener todo el clip en memoria
+- Compatibilidad con generación incremental
 
-| VAE | Compresión espacial | Compresión temporal | Ratio total | Modelo |
-|:----|:--------------------|:-------------------|:------------|:-------|
-| Wan 3D Causal VAE | 8× | 4× | 256× | Wan 2.1/2.2 |
-| Wan Advanced VAE | 8× | 8× | 512× | Wan 2.2 (variantes) |
-| LTX Video VAE | 32× | ~6× | **192×** | LTX-Video |
-| CogVideoX VAE | 8× | 4× | 256× | CogVideoX |
+**El detalle que lo hace funcionar para I2V**: en un VAE causal, el **primer frame se codifica de forma independiente**, sin contexto temporal. Eso hace que su latente sea compatible con el de una imagen suelta, y es lo que permite condicionar la generación de vídeo con una imagen fija. Sin esa asimetría en el primer frame, I2V requeriría un mecanismo aparte.
+
+### Comparación de VAEs de vídeo
+
+⚠️ **Nota metodológica**: la «compresión total» de un VAE **no es el producto de los factores espacial y temporal**. Hay que contar también los canales, igual que en [05 §3](../05-latent-diffusion/README.md#3-el-espacio-latente):
+
+```
+compresión = (f_s · f_s · f_t · 3) / C_latente
+```
+
+| VAE | f espacial | f temporal | Canales | Elementos reducidos | **Compresión real** | Modelo |
+|:----|:-----------|:-----------|:--------|--------------------:|--------------------:|:-------|
+| Wan 3D Causal | 8× | 4× | 16 🟡 | 256× | **48×** | Wan 2.1/2.2 |
+| LTX Video | 32× | 8× | 128 🟡 | 8 192× | **192×** | LTX-Video |
+| CogVideoX | 8× | 4× | 16 🟡 | 256× | **48×** | CogVideoX |
+
+> ⚠️ **Corrección**: la tabla anterior de este módulo daba «256×» para Wan y «192×» para LTX mezclando **dos métodos distintos** — el 256 contaba solo elementos espacio-temporales (8·8·4) y el 192 sí incluía canales. No son comparables entre sí. Con el criterio unificado, la diferencia real entre ambos es de 4×, no de la que sugerían aquellos números.
+>
+> Los recuentos de canales están marcados 🟡: deben contrastarse con las configuraciones oficiales antes de darlos por buenos.
 
 ---
 
@@ -182,12 +198,18 @@ graph TB
     style FullST fill:#0f3460,stroke:#fff,color:#fff
 ```
 
-| Tipo | Complejidad | Consistencia temporal | Uso |
-|:-----|:-----------|:---------------------|:----|
-| Spatial only | O((H·W)²) por frame | ✗ (sin conexión temporal) | No usado solo |
-| **Factorized (spatial + temporal)** | O((H·W)² + T²) | ✓ (buena) | Wan, la mayoría |
-| Full spatiotemporal | O((T·H·W)²) | ✓✓ (mejor) | LTX (en latent comprimido) |
-| Causal temporal | O(T·(H·W)) | ✓ (con restricción causal) | Generación streaming |
+Complejidades **por bloque, sobre el clip completo** (`S = H·W` posiciones espaciales, `T` frames latentes):
+
+| Tipo | Complejidad total | Consistencia temporal | Uso |
+|:-----|:------------------|:---------------------|:----|
+| Spatial only | `T · S²` | ✗ ninguna conexión temporal | Nunca en solitario |
+| **Factorizada (spatial + temporal)** | `T · S²  +  S · T²` | ✓ buena | Wan y la mayoría |
+| Full spatiotemporal | `(T · S)²` | ✓✓ mejor | LTX, sobre latente muy comprimido |
+| Causal temporal (enmascarada) | `T · S²  +  S · T²` | ✓ con restricción causal | Generación en streaming |
+
+> ⚠️ **Corrección**: la versión anterior daba `O(T·(H·W))` para la atención causal temporal, es decir **lineal en T**. No lo es: enmascarar el futuro elimina la mitad de las entradas de la matriz de atención pero **no cambia el orden** — sigue siendo cuadrática en `T`. Solo los esquemas lineales o recurrentes (SSM, atención lineal) bajan a `O(T)`.
+
+**Por qué la factorización es la opción por defecto**: `T·S² + S·T²` frente a `(T·S)²`. Con `T = 30` y `S = 14 400`, la factorizada cuesta ~1.9·10¹⁰ y la completa ~1.9·10¹¹ — **un orden de magnitud**. La atención completa solo es viable si el VAE comprime lo bastante como para que `T·S` se mantenga pequeño, que es exactamente la apuesta de LTX con su compresión de 192×.
 
 ---
 
@@ -227,6 +249,8 @@ graph TB
 
 ### Tabla de capacidades por modelo
 
+> ⚠️ Tabla 🟡/⚠️ en su conjunto: **pendiente de contrastar** contra los model cards oficiales de cada versión.
+
 | Capability | Wan 2.1 | Wan 2.2 | LTX-2 | LTX-2.3 |
 |:-----------|:--------|:--------|:------|:--------|
 | T2V | ✓ | ✓ | ✓ | ✓ |
@@ -259,11 +283,11 @@ graph TB
 | **Fortalezas** | Open-source, buen balance calidad/eficiencia |
 | **Fuente** | [arxiv:2503.20314](https://arxiv.org/abs/2503.20314) |
 
-### Wan 2.2
+### Wan 2.2 🟡
 
 | Aspecto | Detalle |
 |:--------|:--------|
-| **Innovación clave** | MoE-DiT (Mixture of Experts por timestep) |
+| **Innovación clave** | MoE-DiT: expertos especializados por **régimen de ruido**, con selección determinista por umbral de SNR y **un solo experto activo por paso** — sin router aprendido, porque el timestep se conoce de antemano ([06 §6](../06-architectures/README.md#6-moe-dit)) |
 | **VAE** | Advanced 3D Causal VAE (mayor compresión) |
 | **Datos** | Dataset significativamente ampliado |
 | **Nuevas capacidades** | Animate (character animation), S2V (sound-to-video) |
@@ -326,14 +350,23 @@ graph TB
 
 ### Tabla de scaling
 
-| Configuración | Tokens latentes | Relativo a SD (512²) | VRAM est. |
-|:-------------|:---------------|:---------------------|:----------|
-| SD 1.5 (512²) | 4,096 | 1× | 4-6 GB |
-| SDXL (1024²) | 16,384 | 4× | 8-12 GB |
-| FLUX.1 (1024²) | 16,384 | 4× | 24 GB |
-| Wan 2.1 (720p, 3s, 24fps) | ~200,000 | **49×** | 24-40 GB |
-| Wan 2.2 (720p, 5s, 24fps) | ~350,000 | **85×** | 40-80 GB |
-| LTX-2.3 (4K, 5s, 50fps) | ~2,000,000 | **488×** | 80+ GB |
+**Metodología**: se cuentan los **tokens que ve la atención**, no las posiciones latentes. En los modelos DiT hay un *patchify* (típicamente `p = 2`) que divide el número de posiciones entre `p²` antes de entrar al transformer. Confundir ambas cosas infla la cuenta 4× en todos los modelos basados en DiT.
+
+| Configuración | Posiciones latentes | Patch | **Tokens de atención** | Relativo | Coste atención (n²) | VRAM est. |
+|:-------------|--------------------:|:------|-----------------------:|---------:|--------------------:|:----------|
+| SD 1.5 (512²) | 4 096 | — (U-Net) | 4 096 | 1× | 1× | 4-6 GB |
+| SDXL (1024²) | 16 384 | — (U-Net) | 16 384 | 4× | 16× | 8-12 GB |
+| FLUX.1 (1024²) | 16 384 | **2×2** | **4 096** | **1×** | **1×** | ~24 GB |
+| Wan 2.1 (720p, 3 s, 24 fps) | ~259 000 | 2×2 🟡 | ~65 000 | ~16× | ~250× | 24-40 GB |
+| Wan 2.2 (720p, 5 s, 24 fps) | ~432 000 | 2×2 🟡 | ~108 000 | ~26× | ~700× | 40-80 GB |
+| LTX-2.3 (4K, 5 s, 50 fps) | ~253 000 ⚠️ | 1×1 🟡 | ~253 000 | ~62× | ~3 800× | 80+ GB |
+
+> ⚠️ **Dos correcciones respecto a la versión anterior**:
+>
+> 1. **FLUX.1 no ve 16 384 tokens sino ~4 096.** Con patch size 2, un latente de 128×128 produce 64×64 tokens. Contarlo igual que SDXL borra precisamente la razón por la que un DiT es viable a esa resolución.
+> 2. **LTX-2.3 a 4K no son ~2 000 000 de posiciones.** Con su VAE de `f_s=32` y `f_t=8`, 3840×2160 da 120×68 por frame latente y 250 frames se comprimen a ~31: unas **253 000** posiciones. La cifra anterior correspondía a un `f=8` estándar y contradecía la propia tesis del modelo — que su compresión extrema es lo que hace tratable el 4K.
+
+> **La conclusión al usar la métrica correcta**: FLUX.1 a 1024² cuesta en atención lo mismo que SD 1.5 a 512². Todo el salto de resolución de 2022 a 2024 se pagó con **compresión** (VAE + patchify), no con más cómputo de atención. El vídeo es donde esa palanca se agota y el coste sí explota.
 
 ### La jerarquía de bottlenecks en video
 
@@ -377,4 +410,4 @@ graph LR
 
 ---
 
-*← [16 — Image Models](../16-image-models/README.md) | [18 — Evaluation →](../18-evaluation/README.md)*
+*← [16 — Image Models](../16-image-models/README.md) | 18 — Evaluation (pendiente)*
