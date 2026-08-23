@@ -441,7 +441,7 @@ En LTX, la VAE decoder no solo convierte latents a píxeles — también realiza
 ### Caso A — modelo con CFG clásico (SDXL, 30 pasos = 60 NFE)
 
 ```mermaid
-pie title "Tiempo de inferencia — SDXL, 1024x1024, 30 pasos con CFG"
+pie title Tiempo de inferencia — SDXL 1024x1024, 30 pasos con CFG
     "Text encoding (1 vez)" : 2
     "Denoising: rama condicional (30 NFE)" : 45
     "Denoising: rama incondicional del CFG (30 NFE)" : 45
@@ -451,7 +451,7 @@ pie title "Tiempo de inferencia — SDXL, 1024x1024, 30 pasos con CFG"
 ### Caso B — guidance destilada (FLUX.1 dev, 30 pasos = 30 NFE)
 
 ```mermaid
-pie title "Tiempo de inferencia — FLUX.1 dev, 30 pasos, guidance destilada"
+pie title Tiempo de inferencia — FLUX.1 dev, 30 pasos, guidance destilada
     "Text encoding: CLIP + T5-XXL (1 vez)" : 6
     "Denoising loop (30 NFE, 1 pasada por paso)" : 88
     "VAE decode (1 vez)" : 6

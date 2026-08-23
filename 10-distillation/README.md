@@ -384,7 +384,7 @@ Calidad
 1. **Distribution matching** desplazando al MSE puro como objetivo de distillation
 2. **Híbridos**: adversarial + distribucional + flow matching en un solo pipeline
 3. **Guidance distillation por defecto** en los modelos nuevos de frontera
-4. **Distillation + cuantización** combinadas para GPU de consumo ([14](../14-quantization/))
+4. **Distillation + cuantización** combinadas para GPU de consumo (módulo 14, pendiente)
 5. **Post-training con reward models** tras la distillation, para recuperar calidad perceptual
 
 ### Modelos destilados prominentes
