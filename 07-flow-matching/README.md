@@ -7,15 +7,17 @@
 ## Índice
 
 1. [¿Por qué Flow Matching?](#1-por-qué-flow-matching)
-2. [Formulación matemática](#2-formulación-matemática)
-3. [Conditional Flow Matching (CFM)](#3-conditional-flow-matching)
-4. [Rectified Flow](#4-rectified-flow)
-5. [Diffusion vs Flow Matching: comparación profunda](#5-comparación)
-6. [Trayectorias: curvas vs rectas](#6-trayectorias)
-7. [ODE Solvers y NFE](#7-ode-solvers)
-8. [Velocity prediction vs ε-prediction](#8-velocity-vs-epsilon)
-9. [Modelos que usan Flow Matching](#9-modelos)
-10. [Diagrama conceptual completo](#10-diagrama)
+2. [Convención de tiempo](#2-convención-de-tiempo)
+3. [Formulación matemática](#3-formulación-matemática)
+4. [Conditional Flow Matching (CFM)](#4-conditional-flow-matching-cfm)
+5. [Rectified Flow y el problema del cruce](#5-rectified-flow-y-el-problema-del-cruce)
+6. [Timestep sampling y shift](#6-timestep-sampling-y-shift)
+7. [Diffusion vs Flow Matching](#7-diffusion-vs-flow-matching)
+8. [Trayectorias: curvas vs rectas](#8-trayectorias-curvas-vs-rectas)
+9. [ODE Solvers y NFE](#9-ode-solvers-y-nfe)
+10. [Velocity prediction vs ε-prediction](#10-velocity-prediction-vs-ε-prediction)
+11. [Modelos que usan Flow Matching](#11-modelos-que-usan-flow-matching)
+12. [Diagrama conceptual completo](#12-diagrama-conceptual-completo)
 
 ---
 
@@ -39,28 +41,44 @@ graph LR
 | Aspecto | Diffusion clásico | Flow Matching |
 |:--------|:-------------------|:--------------|
 | Formulación | SDE (estocástica) | ODE (determinística) |
-| Trayectoria | Curva, ruidosa | Recta, directa |
+| Trayectoria | Curva | Recta por par; casi recta tras reflow |
 | Training target | Predecir ruido ε | Predecir velocidad v |
 | Pasos típicos | 20–50 (DDIM) a 1000 (DDPM) | 4–30 |
-| NFE (evaluaciones del modelo) | Alto | Bajo |
-| Inversión | Aproximada | Exacta |
+| NFE | Alto | Bajo |
+| Inversión | Aproximada (error de discretización) | Aproximada, pero **con menos error** |
+
+> ⚠️ **Corrección frecuente**: se dice que la inversión en Flow Matching es «exacta». No lo es. Es una integración numérica de una ODE, igual que la inversión DDIM ([03 §6](../03-ddim/README.md#6-ddim-inversion)), y acumula el mismo tipo de error de discretización. Lo que cambia es la **magnitud**: una trayectoria recta se integra con mucho menos error que una curva. Exacta solo en el límite de paso infinitesimal.
 
 ### La intuición clave
 
-Imagina que tienes una nube de puntos de ruido y una nube de puntos de datos. Quieres mover cada punto de ruido hacia un punto de datos.
+Tienes una nube de puntos de ruido y una nube de puntos de datos. Quieres mover cada punto de ruido hasta un punto de datos.
 
-- **Diffusion**: Cada punto hace un camino errático, como una partícula browniana
-- **Flow Matching**: Cada punto va en línea recta desde ruido hasta dato
+- **Diffusion**: cada punto recorre un camino curvo determinado por el noise schedule
+- **Flow Matching**: cada punto va en línea recta
 
-La línea recta es más fácil de seguir con menos pasos de discretización.
+Una recta se sigue con un solo paso de Euler sin error. Una curva necesita muchos pasos para no salirse.
 
 ---
 
-## 2. Formulación matemática
+## 2. Convención de tiempo
+
+Antes de nada, porque es la fuente número uno de confusión al leer código y papers de este área:
+
+| Convención | t = 0 | t = 1 | Usada por |
+|:-----------|:------|:------|:----------|
+| **Flow Matching (esta guía)** | Ruido | Datos | Lipman et al., Liu et al. |
+| **Diffusion** | Datos (`x₀`) | Ruido (`x_T`) | DDPM, DDIM, [01](../01-foundations/)–[05](../05-latent-diffusion/) |
+| **SD3 / diffusers** | Datos | Ruido | Implementaciones de producción |
+
+> **En este módulo**: `x₀` es **ruido** y `x₁` son **datos**. Es exactamente al revés que en los módulos 01–05, donde `x₀` es la imagen limpia. Cada vez que se cruzan las dos notaciones aquí se indica explícitamente.
+
+---
+
+## 3. Formulación matemática
 
 ### Continuous Normalizing Flows (CNF)
 
-Definimos un flujo continuo como un mapa `φ: [0,1] × ℝᵈ → ℝᵈ` que transporta una distribución `p₀` (ruido) a `p₁` (datos):
+Un flujo continuo es un mapa `φ: [0,1] × ℝᵈ → ℝᵈ` que transporta `p₀` (ruido) a `p₁` (datos):
 
 ```
 φₜ(x) = x + ∫₀ᵗ vθ(φₛ(x), s) ds
@@ -68,55 +86,55 @@ Definimos un flujo continuo como un mapa `φ: [0,1] × ℝᵈ → ℝᵈ` que tr
 
 donde `vθ` es un campo de velocidad parametrizado por una red neuronal.
 
-### El campo de velocidad
-
-La red neuronal aprende `vθ(x, t)` — la "velocidad" con la que un punto `x` debería moverse en el tiempo `t`.
-
 ### Ecuación de flujo
 
 ```
 dx/dt = vθ(x, t)
 ```
 
-Esta es una **ODE ordinaria**, no una SDE estocástica. Es determinística y exactamente invertible.
+Una **ODE**, no una SDE. Determinística y reversible en el límite continuo.
 
 ### Distribuciones marginales
 
-El campo de velocidad induce una secuencia de distribuciones `pₜ` que evoluciona según la **ecuación de continuidad**:
+El campo de velocidad induce una familia `pₜ` que evoluciona según la **ecuación de continuidad**:
 
 ```
 ∂pₜ/∂t + ∇ · (pₜ · vₜ) = 0
 ```
 
+Esta ecuación es la que conecta «mover puntos» con «transformar distribuciones»: si el campo `vₜ` transporta las partículas, la densidad se conserva y fluye con ellas.
+
 ---
 
-## 3. Conditional Flow Matching
+## 4. Conditional Flow Matching (CFM)
 
 ### El problema de entrenar un CNF
 
-Entrenar directamente un CNF requiere conocer `pₜ(x)` para todo `t`, lo cual es intractable (requiere marginalizar sobre todos los datos).
+El objetivo ideal sería regresar el campo de velocidad **marginal** `uₜ(x)`:
 
-### La solución: Conditional Flow Matching (CFM)
+```
+L_FM(θ) = E_{t, x~pₜ} ‖ vθ(x, t) - uₜ(x) ‖²
+```
 
-**Lipman et al. (2023)**: En lugar de aprender el campo de velocidad marginal, aprendemos un campo de velocidad **condicionado en un par (x₀, x₁)** específico.
+Pero `uₜ(x)` es intratable: requiere marginalizar sobre todos los datos, igual que la posterior de DDPM ([02 §2](../02-ddpm/README.md#2-formulación-matemática)).
 
-### Probability path condicional
+### La solución
 
-Definimos una interpolación lineal entre un punto de ruido `x₀ ~ N(0,I)` y un dato `x₁ ~ p_data`:
+**Lipman et al. (2023)**: condicionar. En lugar del campo marginal, regresar el campo **condicionado a un par concreto**.
+
+Interpolación lineal entre un punto de ruido `x₀ ~ N(0,I)` y un dato `x₁ ~ p_data`:
 
 ```
 xₜ = (1 - t) · x₀ + t · x₁
 ```
 
-### Campo de velocidad condicional
-
-La velocidad que mueve `xₜ` a lo largo de esta línea recta es simplemente:
+La velocidad a lo largo de esa recta es la derivada temporal, **constante en t**:
 
 ```
-uₜ(x | x₁) = x₁ - x₀
+uₜ(xₜ | x₀, x₁) = dxₜ/dt = x₁ - x₀
 ```
 
-Es constante en el tiempo — la dirección siempre apunta de `x₀` a `x₁`.
+> **Nota de notación**: el campo condicional se escribe a veces `uₜ(x|x₁)`, condicionando solo al dato. En esa forma, para el camino de transporte óptimo, `uₜ(x|x₁) = (x₁ - x)/(1 - t)`. Las dos expresiones coinciden al sustituir `x = xₜ`. Escribir `uₜ(x|x₁) = x₁ - x₀` es un abuso de notación: el miembro derecho depende de `x₀`, así que el condicionamiento es sobre **el par**.
 
 ### Objetivo de entrenamiento
 
@@ -124,18 +142,28 @@ Es constante en el tiempo — la dirección siempre apunta de `x₀` a `x₁`.
 L_CFM(θ) = E_{t~U[0,1], x₀~N(0,I), x₁~p_data} ‖ vθ(xₜ, t) - (x₁ - x₀) ‖²
 ```
 
-> **Insight**: El loss es un simple MSE entre la velocidad predicha y la dirección `x₁ - x₀`. La red aprende a predecir "hacia dónde ir" en cada punto del espacio y del tiempo.
+Un MSE contra una dirección constante. Nada más.
 
 ### Resultado teórico clave
 
-El gradiente de `L_CFM` es un **estimador insesgado** del gradiente del objetivo marginal (intractable). Esto significa que al entrenar con pares individuales, estamos optimizando el objetivo correcto.
+`∇θ L_CFM = ∇θ L_FM`
+
+Los dos objetivos tienen **el mismo gradiente**, aunque sus valores difieran en una constante. Entrenar contra pares individuales optimiza exactamente el campo marginal intratable.
+
+La intuición: el minimizador de un MSE es la esperanza condicional, así que
+
+```
+vθ*(x, t) = E[ x₁ - x₀ | xₜ = x ]
+```
+
+La red aprende **el promedio de todas las velocidades que pasan por ese punto**. Este hecho — que el campo aprendido es una media — es exactamente lo que explica la sección siguiente.
 
 ```mermaid
 graph TB
     subgraph Training ["Entrenamiento CFM"]
-        X0["x₀ ~ N(0,I)"] --> INTERP["xₜ = (1-t)·x₀ + t·x₁"]
-        X1["x₁ ~ p_data"] --> INTERP
-        T["t ~ Uniform[0,1]"] --> INTERP
+        X0["x₀ ~ N(0,I)  (ruido)"] --> INTERP["xₜ = (1-t)·x₀ + t·x₁"]
+        X1["x₁ ~ p_data  (dato)"] --> INTERP
+        T["t ~ p(t) sobre [0,1]"] --> INTERP
 
         INTERP --> NET["vθ(xₜ, t)"]
         X1 --> TARGET["target: x₁ - x₀"]
@@ -156,26 +184,48 @@ graph TB
 
 ---
 
-## 4. Rectified Flow
+## 5. Rectified Flow y el problema del cruce
 
-### Motivación
+### Por qué las trayectorias marginales salen curvas
 
-Aunque CFM define trayectorias rectas entre pares (x₀, x₁), las trayectorias **marginales** (promediando sobre todos los pares posibles) pueden seguir siendo curvas.
+Cada par `(x₀, x₁)` define una recta. Pero **las rectas se cruzan**: dos pares distintos pueden pasar por el mismo punto `x` en el mismo instante `t`, con velocidades diferentes.
 
-**Liu et al. (2023)**: Rectified Flow propone un procedimiento iterativo para "enderezar" las trayectorias marginales.
+```
+   Dos pares independientes, sus rectas se cruzan en P:
 
-### Procedimiento
+   x₀^A ●────────────╲                  ╱────────────● x₁^A
+                       ╲              ╱
+                         ╲          ╱
+                           ╲      ╱
+                             ╲  ╱
+                              P ●   ← aquí conviven dos velocidades
+                             ╱  ╲
+                           ╱      ╲
+                         ╱          ╲
+   x₀^B ●──────────────╱              ╲──────────────● x₁^B
 
-1. **Entrenar** un modelo de flow matching inicial
-2. **Generar pares** (x₀, x₁) usando el modelo entrenado (x₀ = ruido, x₁ = dato generado)
-3. **Re-entrenar** con estos pares — las trayectorias se "enderezan"
-4. **Repetir** si es necesario (cada iteración las trayectorias se hacen más rectas)
+
+   El campo aprendido en P es el PROMEDIO de ambas.
+   Una media de direcciones distintas no apunta a ninguna
+   de las dos → la trayectoria real se curva.
+```
+
+Como `vθ*(x,t) = E[x₁ - x₀ | xₜ = x]`, en un cruce la red **no puede** hacer otra cosa que promediar. La curvatura marginal no es un defecto del entrenamiento: es una consecuencia matemática de que el emparejamiento inicial ruido↔dato es **aleatorio e independiente**.
+
+### La solución: reflow
+
+**Liu et al. (2023)** proponen re-emparejar. Si en lugar de parejas aleatorias usamos las parejas que **el propio modelo ya conecta**, los cruces desaparecen.
+
+1. **Entrenar** un flow matching inicial con emparejamiento aleatorio → *1-rectified flow*
+2. **Generar pares**: integrar la ODE desde muchos `x₀` y guardar los `(x₀, x̂₁)` resultantes
+3. **Re-entrenar** desde cero con esos pares → *2-rectified flow*
+4. **Repetir** si compensa
 
 ```mermaid
 graph LR
-    A["Iteración 0<br/>Trayectorias curvas"] -->|"Generar pares<br/>Re-entrenar"| B["Iteración 1<br/>Más rectas"]
-    B -->|"Generar pares<br/>Re-entrenar"| C["Iteración 2<br/>Casi rectas"]
-    C -->|"..."| D["Converge a<br/>líneas rectas"]
+    A["Emparejamiento aleatorio<br/>Trayectorias marginales curvas"] -->|"generar pares<br/>re-entrenar"| B["2-rectified flow<br/>Mucho más rectas"]
+    B -->|"repetir"| C["k-rectified flow<br/>Casi rectas"]
+    C -->|"destilar"| D["1 paso<br/>(distillation, no reflow)"]
 
     style A fill:#e94560,stroke:#fff,color:#fff
     style B fill:#533483,stroke:#fff,color:#fff
@@ -183,47 +233,95 @@ graph LR
     style D fill:#16213e,stroke:#fff,color:#fff
 ```
 
+**Dos propiedades que hacen que esto funcione**:
+
+| Propiedad | Qué garantiza |
+|:----------|:--------------|
+| **Preserva las marginales** | El reflow no cambia `p₀` ni `p₁`. La distribución generada es la misma; solo cambia qué ruido va a qué dato. |
+| **No aumenta el coste de transporte** | Cada iteración reduce (o mantiene) el coste de transporte para cualquier función convexa. Las trayectorias solo pueden mejorar. |
+
+> ⚠️ **Distinción importante**: **reflow ≠ distillation**. El reflow endereza y mantiene la calidad multi-paso. Los resultados de **un solo paso** de Rectified Flow provienen de **destilar** el modelo enderezado, que es un paso adicional y con pérdida. Ver [10 — Distillation](../10-distillation/README.md).
+
 ### ¿Por qué trayectorias más rectas son mejores?
 
 | Trayectoria | Pasos de Euler necesarios | Error de discretización |
 |:------------|:--------------------------|:-----------------------|
-| Muy curva | Muchos (50-100) | Alto si pocos pasos |
+| Muy curva | Muchos (50-100) | Alto con pocos pasos |
 | Moderadamente curva | Moderados (10-30) | Moderado |
 | Recta | Muy pocos (1-8) | Bajo incluso con pocos pasos |
 
-Una línea recta puede seguirse con un solo paso de Euler. Una curva compleja requiere muchos pasos para no "salirse" de la trayectoria.
+Una recta se integra **exactamente** con un paso de Euler, porque la velocidad es constante. Todo el error de un sampler de pocos pasos viene de la curvatura.
 
 ---
 
-## 5. Comparación profunda: Diffusion vs Flow Matching
+## 6. Timestep sampling y shift
+
+La parte práctica que decide si un modelo de flow matching funciona o no, y que suele quedar fuera de las explicaciones teóricas.
+
+### El muestreo uniforme de t es subóptimo
+
+`L_CFM` muestrea `t ~ U[0,1]`. Pero los timesteps no son igual de difíciles ni de informativos: en los extremos (`t≈0`, `t≈1`) la tarea es casi trivial, mientras que en la zona intermedia es donde se decide la estructura de la imagen.
+
+**SD3** muestrea `t` de una **logit-normal** en lugar de uniforme:
+
+```
+u ~ N(m, s²)          →          t = σ(u) = 1/(1+e^{-u})
+```
+
+Esto concentra las muestras en el centro de [0,1] y deja los extremos poco representados. Es el análogo directo del weighting de SNR de [01 §7](../01-foundations/README.md#7-parametrizaciones): flow matching no elimina el problema de ponderación, lo traslada de la forma del schedule a la **distribución de muestreo de t**.
+
+### Resolution shift
+
+Un mismo nivel de ruido destruye **menos** información en una imagen grande que en una pequeña, porque hay más redundancia espacial que sobrevive. Un modelo entrenado a 256² aplicado a 1024² resulta, en la práctica, poco ruidoso para los t altos.
+
+La corrección es desplazar el schedule de tiempo según la resolución:
+
+```
+t_shifted = (s · t) / (1 + (s - 1) · t)
+```
+
+con `s > 1` creciente con el número de tokens. Desplaza masa hacia los niveles de ruido altos.
+
+> **Consecuencia para [01 §5](../01-foundations/README.md#5-noise-schedules)**: la afirmación «Flow Matching no necesita schedule» es cierta solo en cuanto a *schedule de ruido*. La elección de `p(t)` y del shift cumple exactamente el mismo papel, y hay que ajustarla igual.
+
+---
+
+## 7. Diffusion vs Flow Matching
 
 ### Tabla matemática
 
+> Recordatorio de [§2](#2-convención-de-tiempo): en la columna de Diffusion, `x₀` = **datos**. En la de Flow Matching, `x₀` = **ruido**. Para evitar el choque, aquí se escribe `x_data` y `x_noise`.
+
 | Concepto | Diffusion | Flow Matching |
 |:---------|:----------|:--------------|
-| **Proceso forward** | `xₜ = √ᾱₜ·x₀ + √(1-ᾱₜ)·ε` | `xₜ = (1-t)·x₀ + t·x₁` |
-| **Distribución** | `q(xₜ\|x₀) = N(√ᾱₜ·x₀, (1-ᾱₜ)I)` | `pₜ(x\|x₁) = N((1-t)·x₀+t·x₁, σ²I)` |
-| **Training target** | `ε` (ruido añadido) | `x₁ - x₀` (velocidad) |
+| **Interpolante** | `xₜ = √ᾱₜ·x_data + √(1-ᾱₜ)·x_noise` | `xₜ = (1-t)·x_noise + t·x_data` |
+| **Coeficientes** | `(√ᾱₜ, √(1-ᾱₜ))`, suma de cuadrados = 1 | `(t, 1-t)`, suma = 1 |
+| **Geometría** | Arco de circunferencia | Segmento recto |
+| **Training target** | `x_noise` | `x_data - x_noise` |
 | **Red predice** | `εθ(xₜ, t)` | `vθ(xₜ, t)` |
-| **Loss** | `‖ε - εθ‖²` | `‖(x₁-x₀) - vθ‖²` |
-| **Sampling** | Reverse SDE/ODE con schedule | ODE: `dx/dt = vθ(x,t)` |
+| **Loss** | `‖x_noise - εθ‖²` | `‖(x_data - x_noise) - vθ‖²` |
+| **Sampling** | Reverse SDE u ODE con schedule | ODE: `dx/dt = vθ(x,t)` |
 | **Tiempo** | `t ∈ {1,...,T}` discreto | `t ∈ [0,1]` continuo |
-| **Schedule** | `{βₜ}` (noise schedule) | No necesario (interpolación lineal) |
+| **Lo que hay que ajustar** | Noise schedule `{βₜ}` + weighting | Distribución `p(t)` + shift ([§6](#6-timestep-sampling-y-shift)) |
+
+La fila de geometría es la diferencia esencial: **difusión interpola sobre un círculo, flow matching sobre una recta**. Todo lo demás se deriva de ahí.
 
 ### Conexión matemática
 
-Diffusion y Flow Matching **no son tan diferentes como parecen**. Se puede demostrar que:
+Flow Matching y diffusion **no son marcos rivales**; son la misma construcción con distinto interpolante.
 
-1. **Gaussian diffusion** es un caso especial de flow matching donde la probability path es la que define el forward process de DDPM
-2. **DDIM** puede interpretarse como un ODE solver sobre un flow implícito
-3. La **v-prediction** de diffusion es equivalente a la velocity prediction de flow matching (bajo cierta parametrización)
+1. **Gaussian diffusion es un caso particular de flow matching**: basta elegir el probability path `(√ᾱₜ, √(1-ᾱₜ))` en vez del lineal.
+2. **DDIM es un ODE solver** sobre el flujo implícito de ese path ([03 §5](../03-ddim/README.md#5-ddim-como-ode)).
+3. **Las cuatro parametrizaciones son inter-convertibles**: dados `xₜ` y los coeficientes del interpolante, `{x_data, x_noise, v, velocidad}` se determinan mutuamente por álgebra lineal ([01 §7](../01-foundations/README.md#7-parametrizaciones)).
+
+> ⚠️ **Matiz sobre v-prediction**: la `v` de Salimans & Ho (`v = √ᾱ·ε − √(1-ᾱ)·x_data`) y la velocidad de flow matching (`x_data − x_noise`) **no son la misma cantidad**. Son combinaciones lineales distintas de la misma base `{x_data, x_noise}`, sobre paths distintos. Son inter-convertibles, no idénticas. Decir que son «equivalentes» sin más es impreciso.
 
 ```mermaid
 graph TB
-    FM["Flow Matching<br/>(framework general)"] --> GFM["Gaussian Flow Matching<br/>(probability path Gaussiana)"]
-    FM --> OT["Optimal Transport FM<br/>(trayectorias rectas)"]
+    FM["Flow Matching<br/>(framework general:<br/>elige un interpolante)"] --> GFM["Path Gaussiano<br/>(√ᾱ, √(1-ᾱ))"]
+    FM --> OT["Path lineal / OT<br/>(t, 1-t)"]
 
-    GFM --> DIFF["≈ Diffusion Models<br/>(caso particular)"]
+    GFM --> DIFF["= Diffusion Models"]
     OT --> RF["Rectified Flow"]
 
     DIFF --> DDPM2["DDPM (SDE)"]
@@ -238,7 +336,7 @@ graph TB
 
 ---
 
-## 6. Trayectorias: curvas vs rectas
+## 8. Trayectorias: curvas vs rectas
 
 ### Visualización conceptual
 
@@ -255,92 +353,100 @@ graph TB
               ·  ·               · ·
                    ·  ·  ·  · ·
 
-                Flow Matching (recto)
+                Flow Matching (recto por par)
     x₀ · · · · · · · · · · · · · · · · · x₁
 ```
 
 ### Implicaciones prácticas
 
-| Tipo de trayectoria | Euler con 1 paso | Euler con 4 pasos | Euler con 20 pasos |
-|:--------------------|:-----------------|:------------------|:-------------------|
+| Tipo de trayectoria | Euler 1 paso | Euler 4 pasos | Euler 20 pasos |
+|:--------------------|:-------------|:--------------|:---------------|
 | DDPM (estocástica) | Inutilizable | Muy malo | Aceptable |
 | DDIM (curva) | Malo | Aceptable | Bueno |
-| Flow Matching (recta) | Aceptable | Bueno | Excelente |
-| Rectified Flow (muy recta) | Bueno | Muy bueno | Excelente |
+| Flow Matching (recta por par, marginal curva) | Aceptable | Bueno | Excelente |
+| Rectified Flow tras reflow | Bueno | Muy bueno | Excelente |
+
+> Nota: la fila de Flow Matching se refiere al modelo **sin reflow**. Sus trayectorias son rectas por par pero el campo marginal aprendido sigue siendo curvo por el problema del cruce ([§5](#5-rectified-flow-y-el-problema-del-cruce)). El salto real de calidad en pocos pasos lo da el reflow, no el interpolante lineal por sí solo.
 
 ---
 
-## 7. ODE Solvers y NFE
+## 9. ODE Solvers y NFE
 
 ### ¿Qué es NFE?
 
-**Number of Function Evaluations** = cuántas veces necesitamos evaluar la red neuronal para generar una muestra.
+**Number of Function Evaluations** = cuántas veces hay que evaluar la red para generar una muestra.
 
-Cada evaluación del modelo es costosa (forward pass de un transformer de billones de parámetros), así que **NFE ∝ latencia ∝ coste**.
+Cada evaluación es un forward pass de un transformer de miles de millones de parámetros, así que **NFE ∝ latencia ∝ coste**. Es la métrica que de verdad importa, no el «número de pasos».
 
 ### Solvers y su NFE
 
 | Solver | Orden | NFE por paso | Notas |
 |:-------|:------|:-------------|:------|
-| **Euler** | 1 | 1 | Más simple, menos preciso |
-| **Heun** | 2 | 2 | Predictor-corrector |
-| **Midpoint** | 2 | 2 | Evaluación en punto medio |
-| **RK4** | 4 | 4 | Clásico, alta precisión |
-| **DPM-Solver** | 2-3 | 1 | Especializado para difusión |
-| **DPM-Solver++** | 2-3 | 1 | Mejorado para pocos pasos |
+| **Euler** | 1 | 1 | El más simple; óptimo si la trayectoria es recta |
+| **Heun** | 2 | 2 | Predictor-corrector; el sampler por defecto de EDM |
+| **Midpoint** | 2 | 2 | Evaluación en el punto medio |
+| **RK4** | 4 | 4 | Clásico, alta precisión, caro |
+| **DPM-Solver (2S/3S)** | 2-3 | 2-3 | *Singlestep*: varias evaluaciones por paso |
+| **DPM-Solver++ (2M)** | 2 | **1** | *Multistep*: reutiliza la evaluación del paso anterior |
+| **UniPC** | 2-3 | ~1 | Corrector unificado, multistep |
+
+> ⚠️ **Corrección frecuente**: se atribuye a DPM-Solver «orden 2-3 con 1 NFE por paso». Solo es cierto para las variantes **multistep** (`2M`, `3M`), que consiguen orden alto reutilizando evaluaciones anteriores, como un método de Adams. Las variantes **singlestep** (`2S`, `3S`) gastan 2 o 3 NFE por paso.
 
 ### Trade-off: pasos × orden
 
-Para un presupuesto fijo de NFE (e.g., 20):
+Para un presupuesto fijo de NFE = 20:
 
-| Configuración | Pasos | NFE por paso | NFE total | Precisión |
-|:--------------|:------|:-------------|:----------|:----------|
-| Euler × 20 | 20 | 1 | 20 | Baja-Media |
-| Heun × 10 | 10 | 2 | 20 | Media-Alta |
-| RK4 × 5 | 5 | 4 | 20 | Alta |
-| DPM-Solver++ × 20 | 20 | 1 | 20 | Alta (especializado) |
+| Configuración | Pasos | NFE/paso | NFE total | Cuándo conviene |
+|:--------------|:------|:---------|:----------|:----------------|
+| Euler × 20 | 20 | 1 | 20 | Trayectorias rectas (post-reflow) |
+| Heun × 10 | 10 | 2 | 20 | Trayectorias curvas, presupuesto medio |
+| RK4 × 5 | 5 | 4 | 20 | Rara vez óptimo: pocos pasos, mucho coste |
+| DPM-Solver++(2M) × 20 | 20 | 1 | 20 | Difusión con pocos pasos |
 
-> **Insight**: Con trayectorias rectas (Flow Matching), Euler funciona sorprendentemente bien. Con trayectorias curvas (diffusion), solvers de orden superior o especializados son necesarios.
+> **Insight**: el orden del solver y la rectitud de la trayectoria son **sustitutivos**. Enderezar la trayectoria en el entrenamiento (reflow) o compensar la curvatura en la inferencia (solver de orden alto) atacan el mismo error. Flow matching apuesta por lo primero, que es gratis en inferencia. Detalle en [08 — Sampling](../08-sampling/README.md).
 
 ---
 
-## 8. Velocity prediction vs ε-prediction
+## 10. Velocity prediction vs ε-prediction
 
 ### Correspondencia
 
-| Diffusion | Flow Matching | Relación |
-|:----------|:-------------|:---------|
-| Predecir ε (ruido) | Predecir v (velocidad) | `v = x₁ - x₀`, `ε ≈ x₀` (en flow matching, x₀ es el ruido) |
-| `xₜ = √ᾱ·x₁ + √(1-ᾱ)·ε` | `xₜ = (1-t)·x₀ + t·x₁` | Parametrizaciones del mismo concepto |
-| Schedule `{βₜ}` define la curva | `t ∈ [0,1]` define la línea | Schedule implícito vs explícito |
+| Diffusion | Flow Matching |
+|:----------|:-------------|
+| `xₜ = √ᾱₜ·x_data + √(1-ᾱₜ)·x_noise` | `xₜ = t·x_data + (1-t)·x_noise` |
+| Predecir `x_noise` (el ruido) | Predecir `x_data − x_noise` (la velocidad) |
+| Schedule `{βₜ}` define la curva | El interpolante lineal define la recta |
 
-### ¿Por qué velocity prediction ganó?
+### ¿Por qué velocity prediction se impuso?
 
-1. **Estabilidad numérica**: En los extremos (t≈0, t≈1), ε-prediction tiene varianza alta. Velocity prediction es más estable.
-2. **Compatibilidad con flow matching**: La velocity es el target natural de CFM.
-3. **Uniformidad del loss**: El loss de velocity prediction es más uniforme a lo largo de t.
+1. **No degenera en los extremos.** Con ε-prediction, recuperar `x_data = (xₜ − √(1-ᾱₜ)·ε)/√ᾱₜ` divide por `√ᾱₜ`, que tiende a cero al final del proceso. Con zero-terminal-SNR la operación es directamente indefinida ([01 §6](../01-foundations/README.md#6-snr)). La velocidad está bien condicionada en todo `t ∈ [0,1]`.
+2. **Ponderación más equilibrada del loss.** En espacio-ε, el peso implícito de v-prediction es `1 + 1/SNR` — acotado por debajo por 1, sin la divergencia de x₀-prediction ni la de score ([01 §7](../01-foundations/README.md#7-parametrizaciones)).
+3. **Es el target nativo de CFM**, así que no hay conversión que introduzca factores dependientes de t.
+
+> Lo que **no** es una razón válida: «ε-prediction tiene varianza alta en los extremos». El problema no es la varianza del target sino el **mal condicionamiento de la conversión** a `x_data`.
 
 ---
 
-## 9. Modelos que usan Flow Matching
+## 11. Modelos que usan Flow Matching
 
 | Modelo | Año | Formulación | Detalles |
 |:-------|:----|:-----------|:---------|
-| **SD3 / SD 3.5** | 2024 | Rectified Flow | MMDiT, joint attention |
-| **FLUX.1** | 2024 | Rectified Flow | 12B params, double/single stream blocks |
-| **AuraFlow** | 2024 | Rectified Flow | 6.8B, wider-shorter design |
-| **FLUX.2** | 2025 | Rectified Flow | 32B + Mistral-3 24B VLM |
-| **FLUX.2 Klein** | 2026 | Rectified Flow (distilled) | Sub-second, consumer GPU |
-| **Z-Image** | 2025 | Flow Matching | S3-DiT 6B, single-stream |
+| **SD3 / SD 3.5** | 2024 | Rectified Flow | MMDiT, logit-normal timestep sampling |
+| **FLUX.1** | 2024 | Rectified Flow | 12B, bloques dual + single stream |
+| **AuraFlow** | 2024 | Rectified Flow | 6.8B |
+| **FLUX.2** | 2025 | Rectified Flow | VLM-coupled |
+| **Z-Image** | 2025 | Flow Matching | S3-DiT single-stream |
 | **Qwen-Image** | 2025-26 | Flow Matching | LLM + MMDiT |
-| **Wan 2.1/2.2** | 2025 | Flow Matching | Video, DiT + MoE |
-| **LTX-Video** | 2024-26 | Flow Matching | Video, high-compression VAE |
+| **Wan 2.1 / 2.2** | 2025 | Flow Matching | Vídeo, DiT + MoE |
+| **LTX-Video** | 2024-26 | Flow Matching | Vídeo, VAE de alta compresión |
 
-> **Observación**: Prácticamente **todos** los modelos de producción lanzados después de 2024 usan alguna variante de flow matching. La difusión clásica (ε-prediction + noise schedule) ha quedado relegada a modelos legacy.
+> ⚠️ Especificaciones pendientes de contrastar con [16 — Image Models](../16-image-models/README.md) y [17 — Video Models](../17-video-models/README.md).
+
+> **Sobre la adopción**: flow matching es el estándar en los modelos **nuevos** de frontera desde 2024. Conviene no exagerar la conclusión: SD 1.5 y SDXL — ε-prediction clásica — siguen siendo enormemente usados en producción en 2026, por el ecosistema de LoRAs, ControlNets y herramientas construido a su alrededor. Lo que cambió es dónde se entrena lo nuevo, no lo que se ejecuta en todas partes.
 
 ---
 
-## 10. Diagrama conceptual completo
+## 12. Diagrama conceptual completo
 
 ```mermaid
 graph TB
@@ -351,32 +457,32 @@ graph TB
     end
 
     CNF --> FM["Flow Matching<br/>(Lipman et al., 2023)"]
-    OT --> CFM["Conditional Flow Matching"]
+    OT --> CFM["Conditional Flow Matching<br/>∇L_CFM = ∇L_FM"]
     SM --> DIFF["Diffusion Models"]
 
     FM --> CFM
-    CFM --> RF["Rectified Flow<br/>(Liu et al., 2023)"]
+    CFM --> CROSS["Problema del cruce:<br/>el campo marginal promedia"]
+    CROSS --> RF["Rectified Flow / reflow<br/>(Liu et al., 2023)"]
 
-    DIFF -->|"conexión matemática"| FM
+    DIFF -->|"caso particular:<br/>path Gaussiano"| FM
 
-    RF --> MODELS["Modelos modernos"]
+    RF --> PRACT["Práctica: logit-normal t<br/>+ resolution shift"]
+    PRACT --> MODELS["Modelos modernos"]
 
     subgraph Models ["Producción (2024-2026)"]
         SD3["SD3 / MMDiT"]
         FLUX["FLUX.1 / FLUX.2"]
         WAN["Wan 2.x"]
         ZIMG["Z-Image"]
-        QWEN["Qwen-Image"]
     end
 
     MODELS --> SD3
     MODELS --> FLUX
     MODELS --> WAN
     MODELS --> ZIMG
-    MODELS --> QWEN
 
     subgraph KeyInsight ["Insight Clave"]
-        KI["Trayectorias más rectas<br/>= menos pasos<br/>= menos NFE<br/>= menor latencia<br/>= menor coste"]
+        KI["Trayectorias más rectas<br/>= menos NFE<br/>= menor latencia y coste"]
     end
 
     RF --> KeyInsight
@@ -386,17 +492,20 @@ graph TB
     style KeyInsight fill:#0d1117,stroke:#e94560,color:#fff
     style FM fill:#533483,stroke:#e94560,color:#fff
     style RF fill:#0f3460,stroke:#e94560,color:#fff
+    style CROSS fill:#e94560,stroke:#fff,color:#fff
 ```
 
 ---
 
 ## Referencias
 
-- Lipman, Y. et al. (2023). *Flow Matching for Generative Modeling*. ICLR.
-- Liu, X. et al. (2023). *Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow*. ICLR.
-- Chen, R.T.Q. et al. (2018). *Neural Ordinary Differential Equations*. NeurIPS.
-- Albergo, M. & Vanden-Eijnden, E. (2023). *Building Normalizing Flows with Stochastic Interpolants*. ICLR.
-- Esser, P. et al. (2024). *Scaling Rectified Flow Transformers for High-Resolution Image Synthesis*. ICML.
+- Lipman, Y., Chen, R.T.Q., Ben-Hamu, H., Nickel, M., & Le, M. (2023). *Flow Matching for Generative Modeling*. ICLR 2023. — **CFM.**
+- Liu, X., Gong, C., & Liu, Q. (2023). *Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow*. ICLR 2023. — **Rectified Flow, reflow.**
+- Chen, R.T.Q., Rubanova, Y., Bettencourt, J., & Duvenaud, D. (2018). *Neural Ordinary Differential Equations*. NeurIPS 2018. — CNF.
+- Albergo, M. & Vanden-Eijnden, E. (2023). *Building Normalizing Flows with Stochastic Interpolants*. ICLR 2023. — Formulación paralela.
+- Esser, P. et al. (2024). *Scaling Rectified Flow Transformers for High-Resolution Image Synthesis*. ICML 2024. — **SD3: logit-normal sampling y resolution shift ([§6](#6-timestep-sampling-y-shift)).**
+- Karras, T., Aittala, M., Aila, T., & Laine, S. (2022). *Elucidating the Design Space of Diffusion-Based Generative Models*. NeurIPS 2022. — EDM; sampler de Heun.
+- Lu, C. et al. (2022). *DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models*. — Variantes singlestep vs multistep ([§9](#9-ode-solvers-y-nfe)).
 - Holderrieth, P. et al. (2025). *An Introduction to Flow Matching and Diffusion Models*.
 
 ---
